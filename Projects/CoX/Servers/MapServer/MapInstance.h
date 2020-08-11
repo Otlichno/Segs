@@ -1,6 +1,6 @@
 /*
  * SEGS - Super Entity Game Server
- * http://www.segs.io/
+ * http://www.segs.dev/
  * Copyright (c) 2006 - 2019 SEGS Team (see AUTHORS.md)
  * This software is licensed under the terms of the 3-clause BSD License. See LICENSE.md for details.
  */
@@ -17,11 +17,12 @@
 #include "NpcGenerator.h"
 #include "CritterGenerator.h"
 
+#include "GameServer/EmailService/EmailService.h"
+#include "GameServer/ClientOptionService/ClientOptionService.h"
+
 #include <map>
 #include <memory>
 #include <vector>
-
-#define WORLD_UPDATE_TICKS_PER_SECOND 30
 
 class MapServer;
 class SEGSTimer;
@@ -68,8 +69,6 @@ class AbortQueuedPower;
 class DescriptionAndBattleCry;
 class EntityInfoRequest;
 class ChatReconfigure;
-class SwitchViewPoint;
-class SaveClientOptions;
 class SetDefaultPower;
 class UnsetDefaultPower;
 class UnqueueAll;
@@ -79,10 +78,6 @@ class ActivatePowerAtLocation;
 class ActivateInspiration;
 class PowersDockMode;
 class SwitchTray;
-class SelectKeybindProfile;
-class ResetKeybinds;
-class SetKeybind;
-class RemoveKeybind;
 class InteractWithEntity;
 class MoveInspiration;
 class RecvSelectedTitles;
@@ -94,12 +89,12 @@ class TrashEnhancement;
 class TrashEnhancementInPower;
 class BuyEnhancementSlot;
 class RecvNewPower;
-class EmailHeaderResponse;
-class EmailReadResponse;
-class EmailWasReadByRecipientMessage;
-class EmailHeadersToClientMessage;
-class EmailHeaderToClientMessage;
-class EmailCreateStatusMessage;
+struct EmailHeaderResponse;
+struct EmailReadResponse;
+struct EmailWasReadByRecipientMessage;
+struct EmailHeadersToClientMessage;
+struct EmailHeaderToClientMessage;
+struct EmailCreateStatusMessage;
 class MapXferComplete;
 class InitiateMapXfer;
 struct ClientMapXferMessage;
@@ -131,20 +126,24 @@ class MapInstance final : public EventProcessor
 {
         using SessionStore = ClientSessionStore<MapClientSession>;
         using ScriptEnginePtr = std::unique_ptr<ScriptingEngine>;
-        QString                m_data_path;
-        QMultiHash<QString, glm::mat4>  m_all_spawners;
-        std::unique_ptr<SEGSTimer> m_world_update_timer;
-        std::unique_ptr<SEGSTimer> m_resend_timer;
-        std::unique_ptr<SEGSTimer> m_link_timer;
-        std::unique_ptr<SEGSTimer> m_sync_service_timer;
-        std::unique_ptr<SEGSTimer> m_afk_update_timer;
-        std::unique_ptr<SEGSTimer> m_lua_timer;
-        World *                 m_world;
-        GameDBSyncService*      m_sync_service;
-        uint32_t                m_owner_id;
-        uint32_t                m_instance_id;
-        uint32_t                m_index = 1; // what does client expect this to store, and where do we send it?
-        uint8_t                 m_game_server_id=255; // 255 is `invalid` id
+        QString                        m_data_path;
+        QMultiHash<QString, glm::mat4> m_all_spawners;
+        uint32_t                       m_world_update_timer;
+        uint32_t                       m_resend_timer;
+        uint32_t                       m_link_timer;
+        uint32_t                       m_sync_service_timer;
+        uint32_t                       m_afk_update_timer;
+        uint32_t                       m_session_reaping_timer;
+        uint32_t                       m_lua_timer_id;
+        World *                        m_world;
+        GameDBSyncService *            m_sync_service;
+        uint32_t                       m_owner_id;
+        uint32_t                       m_instance_id;
+        uint32_t                       m_index          = 1; // what does client expect this to store, and where do we send it?
+        uint8_t                        m_game_server_id = 255; // 255 is `invalid` id
+
+        EmailService                    m_email_service;
+        ClientOptionService             m_client_option_service;
 
         // I think there's probably a better way to do this..
         // We load all transfers for the map to map_transfers, then on first access to zones or doors, we
@@ -168,6 +167,7 @@ public:
         CritterGeneratorStore   m_critter_generators;
         SpawnDefinitions        m_enemy_spawn_definitions;
         std::vector<LuaTimer>   m_lua_timers;
+        const ACE_Time_Value    m_world_update_interval;
 
 public:
                                 IMPL_ID(MapInstance)
@@ -189,11 +189,13 @@ public:
 
         void send_player_update(Entity *e);
         void                    add_chat_message(Entity *sender, QString &msg_text);
-        void                    startTimer(uint32_t entity_idx);
-        void                    stopTimer(uint32_t entity_idx);
-        void                    clearTimer(uint32_t entity_idx);
+        void                    startLuaTimer(uint32_t entity_idx);
+        void                    stopLuaTimer(uint32_t entity_idx);
+        void                    clearLuaTimer(uint32_t entity_idx);
 
 protected:
+        void                    startTimers();
+        void                    initServices();
         // EventProcessor interface
         void                    serialize_from(std::istream &is) override;
         void                    serialize_to(std::ostream &is) override;
@@ -203,7 +205,6 @@ protected:
         uint32_t                index() const { return m_index; }
         void                    reap_stale_links();
         void                    on_client_connected_to_other_server(SEGSEvents::ClientConnectedMessage *ev);
-        void                    on_client_disconnected_from_other_server(SEGSEvents::ClientDisconnectedMessage *ev);
         void                    process_chat(Entity *sender, QString &msg_text);
 
         // DB -> Server messages
@@ -224,7 +225,7 @@ protected:
         void on_scene_request(SEGSEvents::SceneRequest *ev);
         void on_entities_request(SEGSEvents::EntitiesRequest *ev);
         void on_create_map_entity(SEGSEvents::NewEntity *ev);
-        void on_timeout(SEGSEvents::Timeout *ev);
+
         void on_input_state(SEGSEvents::RecvInputState *st);
         void on_idle(SEGSEvents::Idle *ev);
         void on_shortcuts_request(SEGSEvents::ShortcutsRequest *ev);
@@ -256,8 +257,6 @@ protected:
         void on_description_and_battlecry(SEGSEvents::DescriptionAndBattleCry *ev);
         void on_entity_info_request(SEGSEvents::EntityInfoRequest *ev);
         void on_chat_reconfigured(SEGSEvents::ChatReconfigure *ev);
-        void on_switch_viewpoint(SEGSEvents::SwitchViewPoint *ev);
-        void on_client_options(SEGSEvents::SaveClientOptions *ev);
         void on_set_default_power(SEGSEvents::SetDefaultPower *ev);
         void on_unset_default_power(SEGSEvents::UnsetDefaultPower *ev);
         void on_unqueue_all(SEGSEvents::UnqueueAll *ev);
@@ -267,21 +266,12 @@ protected:
         void on_activate_inspiration(SEGSEvents::ActivateInspiration *ev);
         void on_powers_dockmode(SEGSEvents::PowersDockMode *ev);
         void on_switch_tray(SEGSEvents::SwitchTray *ev);
-        void on_select_keybind_profile(SEGSEvents::SelectKeybindProfile *ev);
-        void on_reset_keybinds(SEGSEvents::ResetKeybinds *ev);
-        void on_set_keybind(SEGSEvents::SetKeybind *ev);
-        void on_remove_keybind(SEGSEvents::RemoveKeybind *ev);
         void on_emote_command(const QString &command, Entity *ent);
         void on_interact_with(SEGSEvents::InteractWithEntity *ev);
-        void on_email_header_response(SEGSEvents::EmailHeaderResponse* ev);
-        void on_email_headers_to_client(SEGSEvents::EmailHeadersToClientMessage *ev);
-        void on_email_header_to_client(SEGSEvents::EmailHeaderToClientMessage *ev);
-        void on_email_read_response(SEGSEvents::EmailReadResponse *ev);
-        void on_email_read_by_recipient(SEGSEvents::EmailWasReadByRecipientMessage *ev);
-        void on_email_create_status(SEGSEvents::EmailCreateStatusMessage *ev);
         void on_move_inspiration(SEGSEvents::MoveInspiration *ev);
         void on_recv_selected_titles(SEGSEvents::RecvSelectedTitles *ev);
         void on_dialog_button(SEGSEvents::DialogButton *ev);
+        void callScriptingDialogButtonCallback(SEGSEvents::DialogButton *ev);
         void on_combine_enhancements(SEGSEvents::CombineEnhancementsReq *ev);
         void on_move_enhancement(SEGSEvents::MoveEnhancement *ev);
         void on_set_enhancement(SEGSEvents::SetEnhancement *ev);
@@ -301,4 +291,8 @@ protected:
         void on_souvenir_detail_request(SEGSEvents::SouvenirDetailRequest* ev);
         void on_store_sell_item(SEGSEvents::StoreSellItem* ev);
         void on_store_buy_item(SEGSEvents::StoreBuyItem* ev);
+
+        // Service <--> MapInstance
+        void on_service_to_client_response(SEGSEvents::UPtrServiceToClientData data);
+        void on_service_to_entity_response(SEGSEvents::UPtrServiceToEntityData data);
 };
